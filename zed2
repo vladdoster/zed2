@@ -98,7 +98,7 @@ sleep 1
     print -rl "// start_offset=start_offset-1 //" >> /tmp/reply
     (( start_offset > 0 )) && {
       start_offset=start_offset-1
-      .zed-set-up-buffer "$LINES-2" -1
+      .zed-set-up-buffer "$LINES" -1
     }
   else
     zle .up-line-or-history
@@ -107,13 +107,14 @@ sleep 1
 
 :zed-down-line-or-history() {
   .zed-get-current-line
-  print -rl "if (( $REPLY >= second_boundary:$second_boundary )); then" >> /tmp/reply
-  if (( REPLY >= second_boundary )); then
+  print -rl "if (( $REPLY >= second_boundary:$second_boundary && \
+$second_boundary < llsize:$llsize )); then" >> /tmp/reply
+  if (( REPLY >= second_boundary && second_boundary < llsize )); then
     print -rl "// start_offset+=1 //" >> /tmp/reply
     start_offset+=1
-    .zed-set-up-buffer "$LINES-2" 1
+    .zed-set-up-buffer "$LINES" 1
   else
-    zle .down-line-or-history
+    (( REPLY < llsize )) && zle .down-line-or-history
   fi
 }
 
@@ -135,8 +136,10 @@ zle -N down-line-or-history :zed-down-line-or-history
   integer first=1 count len len_te te_added
   1="${(Q)1}"
   len=${#1}
-  line_te="${1//$tab/        }"
-  len_te=${#line_te}
+  : "${1//(#m)$tab/$(( (${${${(M)1[MBEGIN]:#$tab}:+1}:-0} == 0) ? (firtab=0) : 0,
+          firtab ? (count += 7) : (count += 3) ))}"
+  len_te=len+count
+  count=0
   line=""
   line_prev="${1[1,COLUMNS]}"
   while (( len_te > COLUMNS )) {
@@ -179,19 +182,30 @@ functions -Ms zed_compute_scrlines 1 1 +zed-compute-scrlines-sh
   lines=( "${(@f)1}" )
   : "${lines[@]/(#m)*/$(( sum+=zed_compute_scrlines(${(q)MATCH}) ))}"
   : ${(P)${2:-REPLY}::=$sum}
-  print -rl "@Total scrlines:$sum" >> /tmp/reply
+}
+
+.zed-count-full-lines() {
+  local -a lines
+  integer count
+  local line
+  lines=( "${(@f)1}" )
+  for line in ${lines[@]}; do
+    line="${line//$tab/        }"
+    (( ${#line} % COLUMNS == 0 )) && count+=1
+  done
+  print -r -- "The full-lines count: $count" >> /tmp/reply
+  : ${(P)${2:-REPLY}::=$count}
 }
 
 .zed-set-up-buffer() {
   print -rl "FFSCK! $start_offset / $REPLY" >> /tmp/reply
   integer lines="$1" buflines scrlines
-  local -a lines1 lines2
   integer direct
   (( $2 > 0 )) && direct=1 # down
   (( $2 < 0 )) && direct=-1 # up
-  lines1=( "${(@f)BUFFER}" ) lines2=( "${(@f)buffer}" )
-  buflines=${#lines1}
-  .zed-compute-scrlines "$BUFFER" scrlines
+  buflines="${#${(@f)BUFFER}}"-1
+  .zed-compute-scrlines "${BUFFER%$nl*}" scrlines
+  print -rl "@Total scrlines:$scrlines (lines: $lines)" >> /tmp/reply
   (( lines > llsize )) && lines=llsize
   (( scrlines > lines )) && scrlines=lines
   (( buflines > lines )) && buflines=lines
@@ -199,32 +213,45 @@ functions -Ms zed_compute_scrlines 1 1 +zed-compute-scrlines-sh
   print -rl "scrlines:$scrlines, buflines:$buflines, buffer[lines_lengths[$start_offset-$direct]+1,lines_lengths[$start_offset+$scrlines-1-direct]]=\${(F)lines1[1,$buflines-1]} $buffer[lines_lengths[start_offset-direct]+1,lines_lengths[start_offset+scrlines-1-direct]]=${BUFFER[lines_lengths[start_offset-direct]+1-lines_lengths[start_offset-direct],lines_lengths[start_offset+scrlines-1-direct]-lines_lengths[start_offset-direct]]}" "sof: $start_offset" "@@\$buffer@@" >> /tmp/reply
   buffer[lines_lengths[start_offset-direct]+1,lines_lengths[start_offset+scrlines-1-direct]]="${BUFFER[lines_lengths[start_offset-direct]+1-lines_lengths[start_offset-direct],lines_lengths[start_offset+scrlines-1-direct]-lines_lengths[start_offset-direct]]}"
   
-  pre_screen_buffer="${buffer[1,lines_lengths[start_offset]]}"
-  post_screen_buffer="${buffer[lines_lengths[start_offset+lines]+1,-1]}"
-
+  local sline="${nl}[][] Test Status Bar [$REPLY][]"
   print -rl -- "@POST@\$post_screen_buffer@POST@" >> /tmp/reply
-  # +1 - because we want to span across a whole (first) line
-  # -1 - because adding `lines' adds 1 too much
-  BUFFER="${buffer[lines_lengths[start_offset]+1,lines_lengths[start_offset+1+scrlines-1]]}"
-  print "^^" $#lines_lengths / $lines "^^" >> /tmp/reply
+  integer component scrlines2 fulllines
+  while (( 1 )) {
+    # +1 - because we want to span across a whole
+    #      line, skipping the previous newline
+    BUFFER="${buffer[lines_lengths[start_offset]+1,lines_lengths[start_offset+(lines>(llsize-start_offset)?(llsize-start_offset):lines)+component]]}"
+    # Recompute scrlines for the new start_offset
+    .zed-compute-scrlines "$BUFFER" scrlines2
+    .zed-count-full-lines "$BUFFER" fulllines
+    (( fulllines+scrlines2 >= lines )) && component=component-1 || break
+    print -rl "%% scrlines2: $scrlines2, fulllines: $fulllines" >> /tmp/reply
+  }
+  component=$(( (lines>(llsize-start_offset)?(llsize-start_offset):lines)+component ))
+  print "^^ %%" scrlines2:$scrlines2 / fulllines:$fulllines / $#lines_lengths / $lines / $component "^^" >> /tmp/reply
 
   print -rl >> /tmp/reply 
-  print -r "##${buffer[lines_lengths[start_offset+scrlines]+1-lines_lengths[start_offset],lines_lengths[start_offset+scrlines]+2-lines_lengths[start_offset]]}##" >> /tmp/reply
-  print -r "##${BUFFER[lines_lengths[start_offset+scrlines]+1-lines_lengths[start_offset],lines_lengths[start_offset+scrlines]+2-lines_lengths[start_offset]]}##" >> /tmp/reply
+  print -r "##${buffer[lines_lengths[start_offset+scrlines2]+1,lines_lengths[start_offset+scrlines2]+2]}##" >> /tmp/reply
+  print -r "##${BUFFER[lines_lengths[start_offset+scrlines2]+1-lines_lengths[start_offset],lines_lengths[start_offset+scrlines2]+2-lines_lengths[start_offset]]}##" >> /tmp/reply
   print -r "##$BUFFER##" >> /tmp/reply
-  local sline="${nl}[][] Test Status Bar [$REPLY][]"
-  BUFFER[lines_lengths[start_offset+scrlines]+1-lines_lengths[start_offset],lines_lengths[start_offset+scrlines]+2-lines_lengths[start_offset]]="$sline"
+  BUFFER="${BUFFER%$nl}"
+  BUFFER[lines_lengths[start_offset+component]+1-lines_lengths[start_offset]]="$sline"
 
   first_boundary=start_offset+1
-  second_boundary=start_offset+lines
+  second_boundary=$(( start_offset+component ))
+
+  pre_screen_buffer="${buffer[1,lines_lengths[start_offset]]}"
+  post_screen_buffer="${buffer[lines_lengths[start_offset+component]+1,-1]}"
+
+  print -r "second_boundary: $second_boundary=$start_offset+$scrlines" >> /tmp/reply
 }
 
 .zed-compute-llen() {
-  integer first=1
+  integer first=1 firtab=1
   1="${(Q)1}"
   len=${#1}
-  line_te="${1//$tab/        }"
-  len_te=${#line_te}
+  : "${1//(#m)$tab/$(( (${${${(M)1[MBEGIN]:#$tab}:+1}:-0} == 0) ? (firtab=0) : 0,
+          firtab ? (count += 7) : (count += 3) ))}"
+  len_te=len+count
   line=""
   line_prev="${1[1,COLUMNS]}"
   while (( len_te > COLUMNS )) {
@@ -264,8 +291,8 @@ functions -Ms zed_compute_llen 1 1 .zed-compute-llen
 .zed-compute-llengths() {
   lines=( "${(f@)buffer}" )
   lines_lengths=()
-  integer idx sum len len_te te_added
-  local line line_prev line_te
+  integer idx sum count len len_te te_added
+  local line line_prev
   : "${lines[@]//(#m)*/$((
     zed_compute_llen(${(q)MATCH})
   ))}"
@@ -302,7 +329,7 @@ if (( bind )) || ! bindkey -M zed >&/dev/null; then
     buffer="$BUFFER"
     print -rl "x|$BUFFER|y" >> /tmp/reply
     .zed-compute-llengths
-    .zed-set-up-buffer "$LINES-2" 0
+    .zed-set-up-buffer "$LINES" 0
     .zed-get-current-line
 
     CURSOR=0
